@@ -1,7 +1,7 @@
 library(tidyverse)
 library(stringr)
 library(furrr)
-plan(multiprocess)
+plan(multiprocess(workers = parallel::detectCores() - 1))
 
 
 get_player_links <- function(season, page_num) {
@@ -13,7 +13,7 @@ get_player_links <- function(season, page_num) {
   }
   
   ### Player Specific Information
-  html <- html[grep("data-playerid", html)]
+  html <- suppressWarnings(html[grep("data-playerid", html)])
   
   player_ids <- as.numeric(str_extract(html, "\\d+"))
   player_links <- gsub("<a href=\"", "", gsub("\" title=\".*", "", gsub(".*<figure class=\"player\">", "", html)))
@@ -27,6 +27,7 @@ get_player_links <- function(season, page_num) {
 get_player_stats <- function(player_id, link, season) {
   url <- paste0("https://www.fifaindex.com", link)
   html <- suppressWarnings(try(scan(url, what = "", sep = "\n")))
+  country_string <- paste0(c("Côte d'Ivoire", "Holland", "Republic Of Ireland", ""), collapse = "|")
   
   if(class(html) == 'try-error') {
     return(NULL) 
@@ -37,7 +38,10 @@ get_player_stats <- function(player_id, link, season) {
   ix <- which(str_detect(html, "badge-dark rating"))[1]
   player_name <- gsub(".*card-header\">", "", gsub("<span.*", "", html[ix]))
   player_country <- gsub("title=\"|\"\\s.*", "", str_extract(html[which(str_detect(html, "link-nation"))], "title=\".*\""))
-  player_rating <- str_extract(html[ix], "\\d\\d")
+  img_html <- html[str_detect(html, player_name) & str_detect(html, "png") & str_detect(html, "class=\"player")]
+  img_html <- gsub("\".*", "", str_extract(img_html, paste0("/static/FIFA", season, "/images/players/.*\\.png\" data-")))
+  player_headshot <- paste0("https://www.fifaindex.com", img_html)
+  player_rating <- as.numeric(str_extract(html[ix], "\\d\\d"))
   player_height <- as.numeric(str_extract(html[ix + 4], "\\d+"))
   player_weight <- as.numeric(str_extract(html[ix + 5], "\\d+"))
   preferred_foot <- str_extract(html[ix + 6], "Left|Right")
@@ -54,11 +58,17 @@ get_player_stats <- function(player_id, link, season) {
   player_work_rate_def <- unlist(str_extract_all(html[ix + 12], "Low|Medium|High"))[2]
   weak_foot <- str_count(html[ix + 13], "fas fa-star")
   skill_moves <- str_count(html[ix + 14], "fas fa-star")
+  if(weak_foot == 0) {
+    weak_foot <- NA
+  }
+  if(skill_moves == 0) {
+    skill_moves <- NA 
+  }
   value <- as.numeric(gsub("\\.", "", str_extract(html[ix + 17], "\\d+\\.*\\d*\\.*\\d*")))
   wage <- as.numeric(gsub("\\.", "", str_extract(html[ix + 18], "\\d+\\.*\\d*")))
   
   ### National Team Info
-  ix_country <- ix + which(str_detect(html[-c(1:ix)], "card-header") & str_detect(html[-c(1:ix)],  paste0("Côte d'Ivoire|Holland|", player_country)))
+  ix_country <- ix + which(str_detect(html[-c(1:ix)], "card-header") & str_detect(html[-c(1:ix)], paste0("title=\"(", country_string, player_country, ") FIFA")))
   if(length(ix_country) > 0) {
     country_kit_number <- as.numeric(str_extract(html[ix_country + 4], "\\d+"))
     country_position <- gsub(">|<.*", "", str_extract(html[ix_country + 3], ">[A-z]*</span>"))
@@ -68,10 +78,21 @@ get_player_stats <- function(player_id, link, season) {
   }
   
   ### Club Team Info
-  ix_club <- which(str_detect(html, "card-header") &  str_detect(html, "class=\"link-team\"") & !str_detect(html, paste0("Côte d'Ivoire|Holland|", player_country)))
+  ix_club <- which(str_detect(html, "card-header") &  str_detect(html, "class=\"link-team\"") & !str_detect(html, paste0("title=\"(", country_string, player_country, ") FIFA")))
+  if(length(ix_club) > 1) {
+    player_country <- ifelse(as.numeric(season) <= 19, 
+                             gsub("\\sFIFA.*", "", gsub("title=\"|\"\\s.*", "", str_extract(html[ix_club[2]], "title=\".*\""))),
+                             gsub("\\sFIFA.*", "", gsub("title=\"|\"\\s.*", "", str_extract(html[ix_club[1]], "title=\".*\""))))
+    ix_club <- ifelse(as.numeric(season) <= 19, ix_club[1], ix_club[2])
+  }
   player_club <- gsub("\\sFIFA.*", "", gsub("title=\"|\"\\s.*", "", str_extract(html[ix_club], "title=\".*\"")))
   club_kit_number <- as.numeric(str_extract(html[ix_club + 4], "\\d+"))
   club_position <- gsub(">|<.*", "", str_extract(html[ix_club + 3], ">[A-z]*</span>"))
+  if(length(player_club) == 0) {
+    player_club <- NA 
+    club_kit_number <- NA
+    club_position <- NA
+  }
   
   loan_flag <- any(grepl("On loan", html))
   if(loan_flag) {
@@ -94,6 +115,10 @@ get_player_stats <- function(player_id, link, season) {
   if(length(joined_club) == 0) {
     joined_club <- NA
   }
+  if(length(contract_length) == 0) {
+    contract_length <- NA
+  }
+  
   
   ### Skill Attributes
   ix_skills <- max(grep("Ball Skills", html))
@@ -105,7 +130,7 @@ get_player_stats <- function(player_id, link, season) {
   # Defense
   marking <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 16], ">\\d+")))
   slide_tackle <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 18], ">\\d+")))
-  if(season >= 11) {
+  if(as.numeric(season) >= 11) {
     standing_tackle <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 20], ">\\d+")))
     offset <- 0
   } else {
@@ -114,29 +139,41 @@ get_player_stats <- function(player_id, link, season) {
   }
   
   # Mental
-  if(season > 16) {
+  if(as.numeric(season) > 16) {
     aggression <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 31 - offset], ">\\d+")))
     reactions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 33 - offset], ">\\d+")))
     att_position <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 35 - offset], ">\\d+")))
     interceptions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 37 - offset], ">\\d+")))
     vision <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 39 - offset], ">\\d+")))
     composure <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 41], ">\\d+")))
-  } else if(season < 11) {
+    creativity <- NA
+  } else if(as.numeric(season) < 11 & as.numeric(season) > 5) {
     aggression <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 31 - offset], ">\\d+")))
     composure <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 33 - offset], ">\\d+")))
     reactions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 35 - offset], ">\\d+")))
     vision <- NA
     interceptions <- NA
     att_position <- NA
+    creativity <- NA
     offset <- offset + 6
-  } else {
+  } else if(as.numeric(season) > 11) {
     aggression <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 31 - offset], ">\\d+")))
     reactions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 33 - offset], ">\\d+")))
     att_position <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 35 - offset], ">\\d+")))
     interceptions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 37 - offset], ">\\d+")))
     vision <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 39 - offset], ">\\d+")))
     composure <- NA
+    creativity <- NA
     offset <- offset + 2
+  } else {
+    aggression <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 31 - offset], ">\\d+")))
+    composure <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 35 - offset], ">\\d+")))
+    reactions <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 33 - offset], ">\\d+")))
+    creativity <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 37 - offset], ">\\d+")))
+    att_position <- NA
+    vision <- NA
+    interceptions <- NA
+    offset <- offset + 4
   }
   
   # Passing
@@ -145,61 +182,101 @@ get_player_stats <- function(player_id, link, season) {
   long_pass <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 56 - offset], ">\\d+")))
   
   # Physical
-  acceleration <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 67 - offset], ">\\d+")))
-  stamina <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 69 - offset], ">\\d+")))
-  strength <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 71 - offset], ">\\d+")))
-  if(season >= 11) {
+  if(as.numeric(season) >= 11) {
+    acceleration <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 67 - offset], ">\\d+")))
+    stamina <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 69 - offset], ">\\d+")))
+    strength <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 71 - offset], ">\\d+")))
     balance <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 73 - offset], ">\\d+")))
     sprint_speed <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 75 - offset], ">\\d+")))
     agility <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 77 - offset], ">\\d+")))
     jumping <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 79 - offset], ">\\d+")))
-  } else{
+  } else if(as.numeric(season) > 5){
+    acceleration <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 67 - offset], ">\\d+")))
+    stamina <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 69 - offset], ">\\d+")))
+    strength <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 71 - offset], ">\\d+")))
     sprint_speed <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 73 - offset], ">\\d+")))
     balance <- NA
     agility <- NA
     jumping <- NA
     offset <- offset + 6
+  } else {
+    acceleration <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 67 - offset], ">\\d+")))
+    sprint_speed <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 69 - offset], ">\\d+")))
+    stamina <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 71 - offset], ">\\d+")))
+    strength <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 73 - offset], ">\\d+")))
+    balance <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 75 - offset], ">\\d+")))
+    agility <- NA
+    jumping <- NA
+    offset <- offset + 4
   }
   
   # Shooting 
-  heading <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 90 - offset], ">\\d+")))
-  shot_power <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 92 - offset], ">\\d+")))
-  finishing <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 94 - offset], ">\\d+")))
-  long_shots <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 96 - offset], ">\\d+")))
-  
-  if(season >= 11) {
+  if(as.numeric(season) >= 11) {
+    heading <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 90 - offset], ">\\d+")))
+    shot_power <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 92 - offset], ">\\d+")))
+    finishing <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 94 - offset], ">\\d+")))
+    long_shots <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 96 - offset], ">\\d+")))
     curve <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 98 - offset], ">\\d+")))
     penalties <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 102 - offset], ">\\d+")))
     vollies <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 104 - offset], ">\\d+")))
     free_kick_accuracy <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 100 - offset], ">\\d+")))
-  } else {
+    shot_accuracy <- NA
+  } else if(as.numeric(season) > 5) {
+    heading <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 90 - offset], ">\\d+")))
+    shot_power <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 92 - offset], ">\\d+")))
+    finishing <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 94 - offset], ">\\d+")))
+    long_shots <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 96 - offset], ">\\d+")))
     free_kick_accuracy <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 98 - offset], ">\\d+")))
     curve <- NA
     vollies <- NA
     penalties <- NA
+    shot_accuracy <- NA
     offset <- offset + 6
+  } else {
+    heading <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 90 - offset], ">\\d+")))
+    shot_accuracy <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 92 - offset], ">\\d+")))
+    shot_power <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 94 - offset], ">\\d+")))
+    finishing <- NA
+    long_shots <- NA
+    free_kick_accuracy <- NA
+    curve <- NA
+    vollies <- NA
+    penalties <- NA
+    offset <- offset + 10
   }
   
-
+  
   # Goalkeeper
-  if(season >= 11) {
+  if(as.numeric(season) >= 11) {
     gk_positioning <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 115 - offset], ">\\d+")))
     gk_diving <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 117 - offset], ">\\d+")))
     gk_handling <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 119 - offset], ">\\d+")))
     gk_kicking <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 121 - offset], ">\\d+")))
     gk_reflexes <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 123 - offset], ">\\d+")))
-  } else {
+    gk_rushing <- NA
+  } else if(as.numeric(season) > 5){
     gk_reflexes <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 115 - offset], ">\\d+")))
     gk_handling <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 117 - offset], ">\\d+")))
     gk_positioning <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 119 - offset], ">\\d+")))
     gk_diving <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 121 - offset], ">\\d+")))
     gk_kicking <- NA
+    gk_rushing <- NA
+  } else {
+    gk_reflexes <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 115 - offset], ">\\d+")))
+    gk_handling <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 119 - offset], ">\\d+")))
+    gk_positioning <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 121 - offset], ">\\d+")))
+    gk_rushing <- as.numeric(gsub(">", "",  str_extract(html[ix_skills + 117 - offset], ">\\d+")))
+    gk_kicking <- NA
+    gk_diving <- NA
+    
   }
   
   df <- tibble("player_id" = player_id,
                "name" = player_name,
                "season" = season,
-               "link" = link,
+               "year" = as.numeric(paste0("20", season)),
+               "page_url" = url,
+               "headshot_url" = player_headshot,
                "rating" = player_rating,
                "club" = player_club,
                "nationality" = player_country,
@@ -227,7 +304,7 @@ get_player_stats <- function(player_id, link, season) {
                "marking" = marking,
                "slide_tackle" = slide_tackle,
                "stand_tackle" = standing_tackle,
-               "agression" = aggression,
+               "aggression" = aggression,
                "reactions" = reactions,
                "att_position" = att_position,
                "interceptions" = interceptions,
@@ -243,33 +320,45 @@ get_player_stats <- function(player_id, link, season) {
                "sprint_speed" = sprint_speed,
                "agility" = agility,
                "jumping" = jumping,
+               "creativity" = creativity,
                "heading" = heading,
                "shot_power" = shot_power,
                "finishing" = finishing,
                "long_shots" = long_shots,
                "curve" = curve,
                "free_kick_accuracy" = free_kick_accuracy,
+               "shot_accuracy" = shot_accuracy,
                "penalties" = penalties,
                "gk_positioning" = gk_positioning,
                "gk_diving" = gk_diving,
                "gk_handling" = gk_handling,
                "gk_kicking" = gk_kicking,
-               "gk_reflexes" = gk_reflexes)
+               "gk_reflexes" = gk_reflexes,
+               "gk_rushing" = gk_rushing)
   
   return(df)
 }
 
-season <- 7:20
-df_links <- future_map_dfr(season, function(s) future_map2_dfr(rep(s, 1), 1, get_player_links))
-df_stats <- df_links %>%
-  as.list() %>%
-  future_pmap_dfr(get_player_stats)
 
-anti_join(df_links, df_stats)
+### Scrape Player Stats from 2005-2020
+seasons <- c(paste0(0, 5:9), 14:20)
+for(s in seasons) {
+  print(paste0("Scraping Player Links for 20", s, " Season"))
+  df_links <- future_map2_dfr(rep(s, 700), 1:700, get_player_links)
+  write_csv(df_links, paste0("links/player_links_20", s, ".csv"))
+}
 
-player_id <- df_links$player_id[12]
-link <- df_links$link[12]
-season <- df_links$season[12]
+for(s in seasons) {
+  print(paste0("Scraping Player Stats for 20", s, " Season"))
+  df_links <- read_csv(paste0("links/player_links_20", s, ".csv"))
+  df_stats <- df_links %>%
+    as.list() %>%
+    future_pmap_dfr(get_player_stats, .progress = T)
+  df_stats$preferred_positions <- unlist(lapply(df_stats$preferred_positions, function(x) {paste(x, collapse = "/")}))
+  write_csv(df_stats, paste0("stats/player_stats_20", s, ".csv"))
+  print(nrow(df_links) == nrow(df_stats))
+}
 
-### Stats for 05 Season
-### Debug something about 06 player links
+### Save Results
+df_stats <- map_dfr(dir("stats", full.names = T), function(file) read_csv(file, col_types = cols(season = col_character())))
+write_csv(df_stats, "player_stats.csv")
