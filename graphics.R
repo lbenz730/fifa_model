@@ -32,7 +32,7 @@ player_evolution <- function(player) {
     if(is.na(url)) {
       return(grob())
     } else
-      return(rasterGrob(readPNG(getURLContent(url)), width = unit(0.2, "npc"), height=unit(0.25, "npc")))
+      return(rasterGrob(readPNG(getURLContent(url)), width = unit(0.2, "npc"), height=unit(0.5, "npc")))
   }
   
   p <- ggplot(filter(df, type != "Goalkeeper"), aes(x = attribute, y = value)) +
@@ -54,12 +54,12 @@ player_evolution <- function(player) {
          title = paste("FIFA Player Evolution:", player),
          subtitle = "Season: {closest_state} | Age: {df$age[df$year == closest_state][1]} | Overall Rating: {df$rating[df$year== closest_state][1]}",
          caption = "Chart: Luke Benz (@recspecs730) | Data: fifaindex.com") +
-    geom_custom(aes(x = grob_col, y = 85, data = headshot_url),
+    geom_custom(aes(x = grob_col, y = 80, data = headshot_url),
                 grob_fun = function(url) render(url)) +
     transition_states(year,
                       transition_length = 3,
                       state_length = 2) 
-  animate(p, fps = 5, end_pause = 25, height = 900, width = 900)
+  animate(p, fps = 5, end_pause = 25, height = 400, width = 400 * 16/9)
   anim_save(paste0("gifs/", gsub("\\s", "", player), ".gif"))
 }
 
