@@ -63,5 +63,28 @@ player_evolution <- function(player) {
   anim_save(paste0("gifs/", gsub("\\s", "", player), ".gif"))
 }
 
-player_evolution("Lionel Messi")
-player_evolution("Cristiano Ronaldo")
+#player_evolution("Lionel Messi")
+#player_evolution("Cristiano Ronaldo")
+
+### Correlation Matrix
+df <- select(df_stats, c("rating", "age", names(df_stats)[c(29:64)]))
+df_cor <- expand.grid("var1" = colnames(df), "var2" = colnames(df), stringsAsFactors = F)
+
+df_cor <- df_cor %>%
+  filter(!str_detect(var1, "gk_"), !str_detect(var2, "gk_")) %>%
+  mutate("correlation" = purrr::map2_dbl(var1, var2, function(x,y) cor(df_stats[[x]], df_stats[[y]], use = "na.or.complete")))
+
+ggplot(df_cor, aes(x = var1, y = var2, fill = correlation)) + 
+  geom_raster(alpha = 0.8) +
+  theme_bw() +
+  scale_fill_viridis_c(option = "B") +
+  theme(axis.title = element_text(size = 20),
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1),
+        plot.title = element_text(size = 22, hjust  = 0.5),
+        plot.subtitle = element_text(size = 18, hjust = 0.5)) +
+  scale_x_discrete(labels = function(x) tools::toTitleCase(gsub("_", " ", x))) +
+  scale_y_discrete(labels = function(x) tools::toTitleCase(gsub("_", " ", x))) +
+  labs(x = "", y = "", fill = "Correlation", 
+       title = "FIFA Player Attribute Correlation Matrix",
+       subtitle = "Non Goalkeeper Attributes")
+ggsave("graphics/correlation_matrix.png", height = 9/1.2, width = 16/1.2)
